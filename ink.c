@@ -1,4 +1,5 @@
 #include "ink.h"
+#include <stdio.h>
 
 const char db_file_name[] = "db.bin";
 
@@ -44,7 +45,6 @@ void db_get_at(const char *filename, off_t offset, char *out_value) {
   Record r;
 
   lseek(fd, offset, SEEK_SET);
-
   ssize_t n = read(fd, &r, sizeof(Record));
   if (n < 0) {
     close(fd);
@@ -56,22 +56,34 @@ void db_get_at(const char *filename, off_t offset, char *out_value) {
 
 void build_index(const char *filename) {
   int fd = open(filename, O_RDONLY);
+  if (fd < 0) {
+    perror("open");
+    exit(1);
+  }
+
   Record r;
-  ssize_t n;
-  off_t offset = lseek(fd, 0, SEEK_SET);
-  do {
-    n = read(fd, &r, sizeof(Record));
-    if (n < 0) {
-      perror("read");
-      close(fd);
-      exit(1);
+
+  off_t offset = 0;
+  while ((read(fd, &r, sizeof(Record))) == sizeof(Record)) {
+
+    int found = 0;
+    for (int i = 0; i < index_entry_len; ++i) {
+      if (strncmp(index_entries[i].key, r.key, KEY_SIZE) == 0) {
+        index_entries[i].offset = offset;
+        found = 1;
+        break;
+      }
     }
 
-    if (n == sizeof(r)) {
+    if (!found) {
       strcpy(index_entries[index_entry_len].key, r.key);
       index_entries[index_entry_len].offset = offset;
     }
-  } while (n > 0);
+
+    index_entry_len++;
+    offset += sizeof(Record);
+  }
+  close(fd);
 }
 
 int db_get(const char *filename, const char *key, char *out_value) {
@@ -121,8 +133,10 @@ void input_loop() {
     if (strcmp(op, "get") == 0) {
       off_t offset = get_offset(key);
       if (offset < 0) {
+        printf("index miss\n");
         db_get(db_file_name, key, out_value);
       } else {
+        printf("index hit\n");
         db_get_at(db_file_name, offset, out_value);
       }
       printf("Key: %s, Value: %s\n", key, out_value);
