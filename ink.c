@@ -1,5 +1,7 @@
 #include "ink.h"
 
+IndexEntry index_entries[MAX_ENTRIES];
+int index_entry_len = 0;
 
 IndexEntry db_insert(const char *filename, const char *key, const char *value) {
   int fd = open("db.bin", O_WRONLY | O_CREAT | O_APPEND, 0644);
@@ -74,9 +76,9 @@ int db_get(const char *filename, const char *key, char *out_value) {
   return found ? 0 : 1;
 }
 
-int return_index(const IndexEntry *indexes, char key[], int n) {
-  for (int i = 0; i < n; ++i) {
-    if (strncmp(indexes[i].key, key, KEY_SIZE) == 0) return indexes[i].offset;
+int get_offset(char *key) {
+  for (int i = 0; i < index_entry_len; ++i) {
+    if (strncmp(index_entries[i].key, key, KEY_SIZE) == 0) return index_entries[i].offset;
   }
   return -1;
 }
@@ -84,39 +86,28 @@ int return_index(const IndexEntry *indexes, char key[], int n) {
 void input_loop() {
   char op[50];
   char key[KEY_SIZE];
-  char value[VALUE_SIZE];
-  IndexEntry index_entry;
+  char in_value[VALUE_SIZE];
+  char out_value[VALUE_SIZE];
+
   do {
     printf("Enter operation: (insert, get)\n");
     scanf(" %s", op);
     printf("Operation entered: %s\n", op);
+    printf("Enter key:\n");
+    scanf("%s", key);
 
     if (strcmp(op, "get") == 0) {
-      char method[50];
-      printf("Enter method for get: (index / key)%s\n", key);
-      scanf("%s", method);
+      off_t offset = get_offset(key);
+      db_get_at("db.bin", offset, out_value);
 
-      if (strcmp(method, "index") == 0) {
-        char out_value[VALUE_SIZE];
-        db_get_at("db.bin", index_entry.offset, out_value);
-
-        printf("Value at %lld offset with key = %s is %s\n", index_entry.offset, index_entry.key, out_value);
-      } else if (strcmp(method, "key") == 0) {
-        printf("Enter key:\n");
-        scanf("%s", key);
-        db_get("db.bin", key, value);
-        printf("Key: %s, Value: %s\n", key, value);
-      }
+      printf("Key: %s, Value: %s\n", key, out_value);
 
     } else if (strcmp(op, "insert") == 0) {
-      printf("Enter key:\n");
-      scanf("%s", key);
       printf("Enter value for %s\n", key);
-      scanf("%s", value);
+      scanf("%s", in_value);
 
-      index_entry = db_insert("db.bin", key, value);
-      printf("Inserted\n");
+      index_entries[index_entry_len++] = db_insert("db.bin", key, in_value);
+      printf("Inserted %s\n", key);
     }
-
   } while (1);
 }
