@@ -10,13 +10,18 @@
 #define KEY_SIZE 32
 #define VALUE_SIZE 256
 #define MAX_ENTRIES 100
-
+#define RECORD_MAGIC 0xCAFEBABE
 extern const char db_file_name[];
 
 typedef struct {
   char key[KEY_SIZE];
   char value[VALUE_SIZE];
 } Record;
+
+typedef struct {
+  uint32_t magic;
+  Record record;
+} DiskRecord;
 
 typedef struct {
   char key[KEY_SIZE];

@@ -1,5 +1,6 @@
 #include "ink.h"
 #include <stdio.h>
+#include <stdlib.h>
 
 const char db_file_name[] = "db.bin";
 
@@ -8,11 +9,16 @@ int index_entry_len = 0;
 
 IndexEntry db_insert(const char *filename, const char *key, const char *value) {
   int fd = open(filename, O_WRONLY | O_CREAT | O_APPEND, 0644);
-
+  if (fd < 0) {
+    perror("open");
+    exit(1);
+  }
   IndexEntry index_entry = {0};
   Record r = {0};
   strncpy(r.key, key, KEY_SIZE - 1);
   strncpy(r.value, value, VALUE_SIZE - 1);
+
+  DiskRecord dr = {.magic = RECORD_MAGIC, .record = r};
 
   off_t offset = lseek(fd, 0, SEEK_END);
   if (offset == (off_t)-1) {
@@ -23,7 +29,7 @@ IndexEntry db_insert(const char *filename, const char *key, const char *value) {
 
   ssize_t total = 0;
   while (total < (ssize_t)sizeof(Record)) {
-    ssize_t n = write(fd, ((char *)&r) + total, sizeof(Record) - total);
+    ssize_t n = write(fd, ((char *)&dr) + total, sizeof(DiskRecord) - total);
     if (n <= 0) {
       perror("write");
       close(fd);
@@ -31,6 +37,11 @@ IndexEntry db_insert(const char *filename, const char *key, const char *value) {
     }
 
     total += n;
+  }
+  if (fsync(fd) < 0) {
+    perror("fsync");
+    close(fd);
+    exit(1);
   }
 
   close(fd);
@@ -42,15 +53,16 @@ IndexEntry db_insert(const char *filename, const char *key, const char *value) {
 
 void db_get_at(const char *filename, off_t offset, char *out_value) {
   int fd = open(filename, O_RDONLY);
-  Record r;
+  DiskRecord dr;
 
   lseek(fd, offset, SEEK_SET);
-  ssize_t n = read(fd, &r, sizeof(Record));
+  ssize_t n = read(fd, &dr, sizeof(DiskRecord));
   if (n < 0) {
     close(fd);
     perror("read");
     exit(1);
   }
+  Record r = dr.record;
   strncpy(out_value, r.value, VALUE_SIZE);
 }
 
@@ -61,12 +73,15 @@ void build_index(const char *filename) {
     exit(1);
   }
 
-  Record r;
+  DiskRecord dr;
 
   off_t offset = 0;
-  while ((read(fd, &r, sizeof(Record))) == sizeof(Record)) {
+  while ((read(fd, &dr, sizeof(DiskRecord))) == sizeof(DiskRecord)) {
+    if (dr.magic != RECORD_MAGIC) break;
 
     int found = 0;
+    Record r = dr.record;
+
     for (int i = 0; i < index_entry_len; ++i) {
       if (strncmp(index_entries[i].key, r.key, KEY_SIZE) == 0) {
         index_entries[i].offset = offset;
@@ -81,7 +96,7 @@ void build_index(const char *filename) {
     }
 
     index_entry_len++;
-    offset += sizeof(Record);
+    offset += sizeof(DiskRecord);
   }
   close(fd);
 }
