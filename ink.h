@@ -27,5 +27,6 @@ IndexEntry db_insert(const char *filename, const char *key, const char *value);
 void db_get_at(const char *filename, off_t offset, char *out_value);
 int return_index(const IndexEntry *indexes, char key[], int n);
 void input_loop();
+void build_index(const char *filename);
 
 #endif

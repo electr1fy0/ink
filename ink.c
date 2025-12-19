@@ -6,7 +6,7 @@ IndexEntry index_entries[MAX_ENTRIES];
 int index_entry_len = 0;
 
 IndexEntry db_insert(const char *filename, const char *key, const char *value) {
-  int fd = open(db_file_name, O_WRONLY | O_CREAT | O_APPEND, 0644);
+  int fd = open(filename, O_WRONLY | O_CREAT | O_APPEND, 0644);
 
   IndexEntry index_entry = {0};
   Record r = {0};
@@ -21,7 +21,7 @@ IndexEntry db_insert(const char *filename, const char *key, const char *value) {
   }
 
   ssize_t total = 0;
-  while (total < sizeof(Record)) {
+  while (total < (ssize_t)sizeof(Record)) {
     ssize_t n = write(fd, ((char *)&r) + total, sizeof(Record) - total);
     if (n <= 0) {
       perror("write");
@@ -54,8 +54,28 @@ void db_get_at(const char *filename, off_t offset, char *out_value) {
   strncpy(out_value, r.value, VALUE_SIZE);
 }
 
+void build_index(const char *filename) {
+  int fd = open(filename, O_RDONLY);
+  Record r;
+  ssize_t n;
+  off_t offset = lseek(fd, 0, SEEK_SET);
+  do {
+    n = read(fd, &r, sizeof(Record));
+    if (n < 0) {
+      perror("read");
+      close(fd);
+      exit(1);
+    }
+
+    if (n == sizeof(r)) {
+      strcpy(index_entries[index_entry_len].key, r.key);
+      index_entries[index_entry_len].offset = offset;
+    }
+  } while (n > 0);
+}
+
 int db_get(const char *filename, const char *key, char *out_value) {
-  int fd = open(db_file_name, O_RDONLY);
+  int fd = open(filename, O_RDONLY);
 
   Record r;
   int found = 0;
