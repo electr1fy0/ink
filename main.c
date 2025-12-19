@@ -1,5 +1,4 @@
 #include "ink.h"
-#include <stdio.h>
 
 int main() {
   printf("Hi from Ink\n");

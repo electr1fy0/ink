@@ -1,10 +1,12 @@
 #include "ink.h"
 
+const char db_file_name[] = "db.bin";
+
 IndexEntry index_entries[MAX_ENTRIES];
 int index_entry_len = 0;
 
 IndexEntry db_insert(const char *filename, const char *key, const char *value) {
-  int fd = open("db.bin", O_WRONLY | O_CREAT | O_APPEND, 0644);
+  int fd = open(db_file_name, O_WRONLY | O_CREAT | O_APPEND, 0644);
 
   IndexEntry index_entry = {0};
   Record r = {0};
@@ -53,7 +55,7 @@ void db_get_at(const char *filename, off_t offset, char *out_value) {
 }
 
 int db_get(const char *filename, const char *key, char *out_value) {
-  int fd = open("db.bin", O_RDONLY);
+  int fd = open(db_file_name, O_RDONLY);
 
   Record r;
   int found = 0;
@@ -77,10 +79,11 @@ int db_get(const char *filename, const char *key, char *out_value) {
 }
 
 int get_offset(char *key) {
+  int found_offset = -1;
   for (int i = 0; i < index_entry_len; ++i) {
-    if (strncmp(index_entries[i].key, key, KEY_SIZE) == 0) return index_entries[i].offset;
+    if (strncmp(index_entries[i].key, key, KEY_SIZE) == 0) found_offset = index_entries[i].offset;
   }
-  return -1;
+  return found_offset;
 }
 
 void input_loop() {
@@ -89,25 +92,27 @@ void input_loop() {
   char in_value[VALUE_SIZE];
   char out_value[VALUE_SIZE];
 
-  do {
+  while (1) {
     printf("Enter operation: (insert, get)\n");
     scanf(" %s", op);
-    printf("Operation entered: %s\n", op);
     printf("Enter key:\n");
     scanf("%s", key);
 
     if (strcmp(op, "get") == 0) {
       off_t offset = get_offset(key);
-      db_get_at("db.bin", offset, out_value);
-
+      if (offset < 0) {
+        db_get(db_file_name, key, out_value);
+      } else {
+        db_get_at(db_file_name, offset, out_value);
+      }
       printf("Key: %s, Value: %s\n", key, out_value);
 
     } else if (strcmp(op, "insert") == 0) {
       printf("Enter value for %s\n", key);
       scanf("%s", in_value);
 
-      index_entries[index_entry_len++] = db_insert("db.bin", key, in_value);
+      index_entries[index_entry_len++] = db_insert(db_file_name, key, in_value);
       printf("Inserted %s\n", key);
     }
-  } while (1);
+  }
 }
