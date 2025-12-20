@@ -28,6 +28,10 @@ typedef struct {
   off_t offset;
 } IndexEntry;
 
+extern IndexEntry index_entries[MAX_ENTRIES];
+extern int index_entry_len ;
+
+
 IndexEntry db_insert(const char *filename, const char *key, const char *value);
 void db_get_at(const char *filename, off_t offset, char *out_value);
 int return_index(const IndexEntry *indexes, char key[], int n);

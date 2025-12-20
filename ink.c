@@ -1,15 +1,10 @@
 #include "ink.h"
+#include <stdio.h>
 #include <stdlib.h>
 
-/*
- * Hardcoded for easy debugging inside the local folder
- * Should be an input in an ideal environment
- */
 const char db_file_name[] = "db.bin";
-
-IndexEntry index_entries[MAX_ENTRIES];
 int index_entry_len = 0;
-
+IndexEntry index_entries[MAX_ENTRIES];
 /*
  * db_insert
  *
@@ -144,9 +139,9 @@ void build_index(const char *filename) {
     if (!found) {
       strcpy(index_entries[index_entry_len].key, r.key);
       index_entries[index_entry_len].offset = offset;
+      index_entry_len++;
     }
 
-    index_entry_len++;
     offset += sizeof(DiskRecord);
   }
   close(fd);
@@ -225,9 +220,16 @@ int get_offset(char *key) {
  * Exits the program on any I/O error. Original database is left intact
  */
 void compact() {
-  int out_fd = open("db.bin.compact", O_CREAT | O_WRONLY | O_TRUNC, 0644);
+  int in_fd = open(db_file_name, O_RDONLY);
+  if (in_fd < 0) {
+    perror("open db");
+    exit(1);
+  }
+
+  int out_fd = open("db.bin.compact", O_WRONLY | O_TRUNC | O_CREAT, 0644);
   if (out_fd < 0) {
     perror("open compact");
+    close(in_fd);
     exit(1);
   }
 
@@ -235,24 +237,31 @@ void compact() {
   off_t new_offset = 0;
 
   for (int i = 0; i < index_entry_len; ++i) {
-    int in_fd = open(db_file_name, O_RDONLY);
-
-    if (in_fd < 0) {
-      perror("open db");
-      exit(1);
-    }
     if (lseek(in_fd, index_entries[i].offset, SEEK_SET) == (off_t)-1) {
       perror("lseek");
+      close(in_fd);
+      close(out_fd);
       exit(1);
     }
 
     ssize_t n = read(in_fd, &dr, sizeof(DiskRecord));
+    if (n != sizeof(DiskRecord) || dr.magic != RECORD_MAGIC) {
+      fprintf(stderr, "corrup record during compaction\n");
+      close(in_fd);
+      close(out_fd);
+      exit(1);
+    }
 
     ssize_t written = write(out_fd, &dr, sizeof(DiskRecord));
     if (written != sizeof(DiskRecord)) {
       perror("write compact");
+      close(in_fd);
+      close(out_fd);
       exit(1);
     }
+
+    // update index to new physical layout
+    index_entries[i].offset = new_offset;
     new_offset += sizeof(DiskRecord);
   }
 
@@ -261,7 +270,13 @@ void compact() {
     exit(1);
   }
 
-  rename("db.bin.compact", "db.bin");
+  close(out_fd);
+  close(in_fd);
+
+  if (rename("db.bin.compact", "db.bin") < 0) {
+    perror("rename");
+    exit(1);
+  }
 }
 
 /*
