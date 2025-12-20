@@ -1,12 +1,27 @@
 #include "ink.h"
-#include <stdio.h>
 #include <stdlib.h>
 
+/*
+ * Hardcoded for easy debugging inside the local folder
+ * Should be an input in an ideal environment
+ */
 const char db_file_name[] = "db.bin";
 
 IndexEntry index_entries[MAX_ENTRIES];
 int index_entry_len = 0;
 
+/*
+ * db_insert
+ *
+ * Appends to DiskRecord to the end of filename and fsyncs it.
+ * Returns an IndexEntry pointing to the on-disk offset.
+ *
+ * Persistence:
+ *  On successful return, the record is durable on disk.
+ *
+ * Failure behaviour:
+ *  Terminates the process on any I/O error.
+ */
 IndexEntry db_insert(const char *filename, const char *key, const char *value) {
   int fd = open(filename, O_WRONLY | O_CREAT | O_APPEND, 0644);
   if (fd < 0) {
@@ -28,7 +43,7 @@ IndexEntry db_insert(const char *filename, const char *key, const char *value) {
   }
 
   ssize_t total = 0;
-  while (total < (ssize_t)sizeof(Record)) {
+  while (total < (ssize_t)sizeof(DiskRecord)) {
     ssize_t n = write(fd, ((char *)&dr) + total, sizeof(DiskRecord) - total);
     if (n <= 0) {
       perror("write");
@@ -50,7 +65,26 @@ IndexEntry db_insert(const char *filename, const char *key, const char *value) {
   strncpy(index_entry.key, key, KEY_SIZE);
   return index_entry;
 }
-
+/*
+ * db_get_at
+ *
+ * Reads a DiskRecord from filename at the given offset and copies
+ * its value field into out_value.
+ *
+ * The offset must refer to the starting position of a valid DiskRecord
+ * previously returned by db_insert. No validation is performed beyond
+ * the read itself.
+ *
+ * Persistence:
+ *  The read observes the on-disk state at the time of the call.
+ *
+ * Failure behaviour:
+ *  Terminates the process on any I/O error.
+ *  Undefined if offset does not point to a valid DiskRecord.
+ *
+ * Ownership:
+ *  out_value must point to a writable buffer of at least VALUE_SIZE bytes.
+ */
 void db_get_at(const char *filename, off_t offset, char *out_value) {
   int fd = open(filename, O_RDONLY);
   DiskRecord dr;
@@ -66,6 +100,23 @@ void db_get_at(const char *filename, off_t offset, char *out_value) {
   strncpy(out_value, r.value, VALUE_SIZE);
 }
 
+/*
+ * build_index
+ *
+ * Reads the database file and builds the in-memory global index of all records
+ * Takes the latest value for each key
+ *
+ * Persistence:
+ *  Performs read-only I/O and does not modify on-disk state.
+ *
+ * Failure behaviour:
+ *  Terminates the process on any I/O error.
+ *
+ * Preconditions:
+ *  index_entries must have sufficient capacity to store all discovered
+ *  keys. No bound checking is performed.
+ *
+ */
 void build_index(const char *filename) {
   int fd = open(filename, O_RDONLY | O_CREAT, 0644);
   if (fd < 0) {
@@ -101,6 +152,21 @@ void build_index(const char *filename) {
   close(fd);
 }
 
+/*
+ * db_get
+ *
+ * Scans the database file and matches the keys of the records with the
+ * param key and then stores the value in out_value
+ *
+ * Persistence:
+ *  Performs read only I/O and does not modify on-disk state.
+ *
+ * Failure behaviour:
+ *  Closes fd and terminates the program on any I/O error.
+ *
+ * Preconditions:
+ *  Out value must be a write only buffer with sufficient space
+ */
 int db_get(const char *filename, const char *key, char *out_value) {
   int fd = open(filename, O_RDONLY);
 
@@ -125,6 +191,15 @@ int db_get(const char *filename, const char *key, char *out_value) {
   return found ? 0 : 1;
 }
 
+/*
+ * get_offset
+ *
+ * Goes through all entries in the in-memory index and
+ * returns the offset value for the input key
+ *
+ * Failure behaviour:
+ *  -1 is returned
+ */
 int get_offset(char *key) {
   int found_offset = -1;
   for (int i = 0; i < index_entry_len; ++i) {
@@ -133,6 +208,22 @@ int get_offset(char *key) {
   return found_offset;
 }
 
+/*
+ * compact
+ *
+ * Performs disk compaction on the database by rewriting all records to a
+ * new compact file from the in-memory index and then
+ * replaces the old database file
+ * This
+ *
+ * Persistence:
+ * A new database file is created with the same name with
+ * redundant unused value entries removed and only latest values retained
+ * per key entry
+ *
+ * Failure behaviour:
+ * Exits the program on any I/O error. Original database is left intact
+ */
 void compact() {
   int out_fd = open("db.bin.compact", O_CREAT | O_WRONLY | O_TRUNC, 0644);
   if (out_fd < 0) {
@@ -160,8 +251,9 @@ void compact() {
     ssize_t written = write(out_fd, &dr, sizeof(DiskRecord));
     if (written != sizeof(DiskRecord)) {
       perror("write compact");
-      new_offset += sizeof(DiskRecord);
+      exit(1);
     }
+    new_offset += sizeof(DiskRecord);
   }
 
   if (fsync(out_fd) < 0) {
@@ -172,7 +264,12 @@ void compact() {
   rename("db.bin.compact", "db.bin");
 }
 
-
+/*
+ * input_loop
+ *
+ * Continous user facing input loop for testing the program
+ * Breaks on Ctrl-C
+ */
 void input_loop() {
   char op[50];
   char key[KEY_SIZE];
