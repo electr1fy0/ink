@@ -67,7 +67,7 @@ void db_get_at(const char *filename, off_t offset, char *out_value) {
 }
 
 void build_index(const char *filename) {
-  int fd = open(filename, O_RDONLY);
+  int fd = open(filename, O_RDONLY | O_CREAT, 0644);
   if (fd < 0) {
     perror("open");
     exit(1);
@@ -132,6 +132,46 @@ int get_offset(char *key) {
   }
   return found_offset;
 }
+
+void compact() {
+  int out_fd = open("db.bin.compact", O_CREAT | O_WRONLY | O_TRUNC, 0644);
+  if (out_fd < 0) {
+    perror("open compact");
+    exit(1);
+  }
+
+  DiskRecord dr;
+  off_t new_offset = 0;
+
+  for (int i = 0; i < index_entry_len; ++i) {
+    int in_fd = open(db_file_name, O_RDONLY);
+
+    if (in_fd < 0) {
+      perror("open db");
+      exit(1);
+    }
+    if (lseek(in_fd, index_entries[i].offset, SEEK_SET) == (off_t)-1) {
+      perror("lseek");
+      exit(1);
+    }
+
+    ssize_t n = read(in_fd, &dr, sizeof(DiskRecord));
+
+    ssize_t written = write(out_fd, &dr, sizeof(DiskRecord));
+    if (written != sizeof(DiskRecord)) {
+      perror("write compact");
+      new_offset += sizeof(DiskRecord);
+    }
+  }
+
+  if (fsync(out_fd) < 0) {
+    perror("fsync");
+    exit(1);
+  }
+
+  rename("db.bin.compact", "db.bin");
+}
+
 
 void input_loop() {
   char op[50];
