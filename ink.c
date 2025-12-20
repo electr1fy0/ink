@@ -1,6 +1,7 @@
 #include "ink.h"
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 const char db_file_name[] = "db.bin";
 int index_entry_len = 0;
@@ -183,7 +184,7 @@ int db_get(const char *filename, const char *key, char *out_value) {
     }
   }
   close(fd);
-  return found ? 0 : 1;
+  return found ? 0 : -1;
 }
 
 /*
@@ -285,6 +286,52 @@ void compact() {
  * Continous user facing input loop for testing the program
  * Breaks on Ctrl-C
  */
+
+/*
+ * db_delete
+ *
+ *
+ */
+void db_delete(const char *filename, const char *key) {
+  int fd = open(filename, O_WRONLY | O_CREAT | O_APPEND, 0644);
+  if (fd < 0) {
+    perror("open");
+    exit(1);
+  }
+
+  off_t offset = lseek(fd, 0, SEEK_END);
+  if (offset == (off_t)-1) {
+    perror("lseek");
+    exit(1);
+  }
+
+  DiskRecord dr = {0};
+  dr.magic = RECORD_MAGIC;
+  dr.deleted = 1;
+  strncpy(dr.record.key, key, KEY_SIZE - 1);
+
+  ssize_t written = write(fd, &dr, sizeof(DiskRecord));
+  if (written != sizeof(DiskRecord)) {
+    perror("write");
+    exit(1);
+  }
+
+  if (fsync(fd) < 0) {
+    perror("fsync");
+    close(fd);
+    exit(1);
+  }
+  close(fd);
+
+  // mark offset of in-memory index as -1 for the said key
+  for (int i = 0; i < index_entry_len; ++i) {
+    if (strncmp(index_entries[i].key, key, KEY_SIZE) == 0) {
+      index_entries[i].offset = -1;
+      return;
+    }
+  }
+}
+
 void input_loop() {
   char op[50];
   char key[KEY_SIZE];
@@ -292,28 +339,36 @@ void input_loop() {
   char out_value[VALUE_SIZE];
 
   while (1) {
-    printf("Enter operation: (insert, get)\n");
+    printf("Enter operation: (insert, get, delete)\n");
     scanf(" %s", op);
     printf("Enter key:\n");
     scanf("%s", key);
 
+    int found = 0;
     if (strcmp(op, "get") == 0) {
       off_t offset = get_offset(key);
+
       if (offset < 0) {
         printf("index miss\n");
-        db_get(db_file_name, key, out_value);
+        if (db_get(db_file_name, key, out_value) >= 0) found = 1;
       } else {
         printf("index hit\n");
         db_get_at(db_file_name, offset, out_value);
+        found = 1; // since it's an index hit
       }
-      printf("Key: %s, Value: %s\n", key, out_value);
-
+      if (found)
+        printf("Key: %s, Value: %s\n", key, out_value);
+      else
+        printf("Value does not exit for key: %s\n", key);
     } else if (strcmp(op, "insert") == 0) {
       printf("Enter value for %s\n", key);
       scanf("%s", in_value);
 
       index_entries[index_entry_len++] = db_insert(db_file_name, key, in_value);
       printf("Inserted %s\n", key);
+    } else if (strcmp(op, "delete") == 0) {
+      db_delete(db_file_name, key);
+      printf("Key %s deleted\n", key);
     }
   }
 }
