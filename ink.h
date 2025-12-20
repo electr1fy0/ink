@@ -23,6 +23,8 @@ typedef struct {
   int used; // 0 = empty, 1 = occupied, -1 = tomstone
 } IndexSlot;
 
+extern IndexSlot index_table[INDEX_CAPACITY];
+
 typedef struct {
   char key[KEY_SIZE];
   char value[VALUE_SIZE];
@@ -41,8 +43,14 @@ typedef struct {
 
 void db_insert(const char *filename, const char *key, const char *value);
 void db_get_at(const char *filename, off_t offset, char *out_value);
+int db_get(const char *filename, const char *key, char *out_value);
+void db_delete(const char *filename, const char *key);
 void input_loop();
 void build_index(const char *filename);
 void compact();
+
+void index_update(const char *key, off_t offset);
+void index_delete(const char *key);
+off_t index_lookup(const char *key);
 
 #endif

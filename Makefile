@@ -1,5 +1,5 @@
-ink: main.c ink.c
-	clang -Wall -Wextra -std=c11 main.c ink.c -o ink
+ink: main.c db.c index.c
+	clang -Wall -Wextra -std=c11 main.c db.c index.c -o ink
 
 run: ink
 	./ink
