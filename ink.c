@@ -1,11 +1,16 @@
 #include "ink.h"
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 const char db_file_name[] = "db.bin";
-int index_entry_len = 0;
-IndexEntry index_entries[MAX_ENTRIES];
+IndexSlot index_table[INDEX_CAPACITY];
+
+void index_update(const char *key, off_t offset);
+void index_delete(const char *key);
+off_t index_lookup(const char *key);
+
 /*
  * db_insert
  *
@@ -18,13 +23,13 @@ IndexEntry index_entries[MAX_ENTRIES];
  * Failure behaviour:
  *  Terminates the process on any I/O error.
  */
-IndexEntry db_insert(const char *filename, const char *key, const char *value) {
+void db_insert(const char *filename, const char *key, const char *value) {
   int fd = open(filename, O_WRONLY | O_CREAT | O_APPEND, 0644);
   if (fd < 0) {
     perror("open");
     exit(1);
   }
-  IndexEntry index_entry = {0};
+
   Record r = {0};
   strncpy(r.key, key, KEY_SIZE - 1);
   strncpy(r.value, value, VALUE_SIZE - 1);
@@ -57,9 +62,7 @@ IndexEntry db_insert(const char *filename, const char *key, const char *value) {
 
   close(fd);
 
-  index_entry.offset = offset;
-  strncpy(index_entry.key, key, KEY_SIZE);
-  return index_entry;
+  index_update(key, offset);
 }
 /*
  * db_get_at
@@ -94,59 +97,6 @@ void db_get_at(const char *filename, off_t offset, char *out_value) {
   }
   Record r = dr.record;
   strncpy(out_value, r.value, VALUE_SIZE);
-}
-
-/*
- * build_index
- *
- * Reads the database file and builds the in-memory global index of all records
- * Takes the latest value for each key
- *
- * Persistence:
- *  Performs read-only I/O and does not modify on-disk state.
- *
- * Failure behaviour:
- *  Terminates the process on any I/O error.
- *
- * Preconditions:
- *  index_entries must have sufficient capacity to store all discovered
- *  keys. No bound checking is performed.
- *
- */
-void build_index(const char *filename) {
-  int fd = open(filename, O_RDONLY | O_CREAT, 0644);
-  if (fd < 0) {
-    perror("open");
-    exit(1);
-  }
-
-  DiskRecord dr;
-  off_t offset = 0;
-
-  while ((read(fd, &dr, sizeof(DiskRecord))) == sizeof(DiskRecord)) {
-    if (dr.magic != RECORD_MAGIC) break;
-
-    int found = 0;
-    Record r = dr.record;
-    for (int i = 0; i < index_entry_len; ++i) {
-      if (strncmp(index_entries[i].key, r.key, KEY_SIZE) == 0) {
-        if (!dr.deleted)
-          index_entries[i].offset = offset;
-        else
-          index_entries[i].offset = -1;
-        found = 1;
-        break;
-      }
-    }
-
-    if (!found) {
-      strcpy(index_entries[index_entry_len].key, r.key);
-      if (!dr.deleted) index_entries[index_entry_len].offset = offset;
-      index_entry_len++;
-    }
-    if (dr.deleted) {}
-    offset += sizeof(DiskRecord);
-  }
   close(fd);
 }
 
@@ -189,22 +139,6 @@ int db_get(const char *filename, const char *key, char *out_value) {
   return found ? 0 : -1;
 }
 
-/*
- * get_offset
- *
- * Goes through all entries in the in-memory index and
- * returns the offset value for the input key
- *
- * Failure behaviour:
- *  -1 is returned
- */
-int get_offset(char *key) {
-  int found_offset = -1;
-  for (int i = 0; i < index_entry_len; ++i) {
-    if (strncmp(index_entries[i].key, key, KEY_SIZE) == 0) found_offset = index_entries[i].offset;
-  }
-  return found_offset;
-}
 
 /*
  * compact
@@ -212,7 +146,6 @@ int get_offset(char *key) {
  * Performs disk compaction on the database by rewriting all records to a
  * new compact file from the in-memory index and then
  * replaces the old database file
- * This
  *
  * Persistence:
  * A new database file is created with the same name with
@@ -239,9 +172,9 @@ void compact() {
   DiskRecord dr;
   off_t new_offset = 0;
 
-  for (int i = 0; i < index_entry_len; ++i) {
-    if (index_entries[i].offset < 0) continue;
-    if (lseek(in_fd, index_entries[i].offset, SEEK_SET) == (off_t)-1) {
+  for (int i = 0; i < INDEX_CAPACITY; ++i) {
+    if (index_table[i].used != 1) continue;
+    if (lseek(in_fd, index_table[i].offset, SEEK_SET) == (off_t)-1) {
       perror("lseek");
       close(in_fd);
       close(out_fd);
@@ -265,7 +198,7 @@ void compact() {
     }
 
     // update index to new physical layout
-    index_entries[i].offset = new_offset;
+    index_table[i].offset = new_offset;
     new_offset += sizeof(DiskRecord);
   }
 
@@ -284,17 +217,114 @@ void compact() {
 }
 
 /*
- * input_loop
+ * hash_key
  *
- * Continous user facing input loop for testing the program
- * Breaks on Ctrl-C
+ * generates the hash-key using the FNV hashing algo
  */
+static uint32_t hash_key(const char *key) {
+  uint32_t h = 2166136261u; // FNV-1 32 bit hash offset
+  for (int i = 0; i < KEY_SIZE && key[i]; ++i) {
+    h ^= (unsigned char)key[i];
+    h *= 16777619u; // a prime number used in 32-bit moduleo arithmetic
+  }
+
+  return h;
+}
+
+/*
+ * index_lookup
+ *
+ * returns the offset of the key from the in-memory index
+ *  -1 =  if not found
+ *  >=0 = offset value
+ */
+off_t index_lookup(const char *key) {
+  uint32_t h = hash_key(key);
+  uint32_t idx = h % INDEX_CAPACITY;
+
+  for (int i = 0; i < INDEX_CAPACITY; ++i) {
+    IndexSlot *slot = &index_table[idx];
+
+    // unused slot (offset not found)
+    if (slot->used == 0) return -1;
+
+    // used slot and not tombstone
+    if (slot->used == 1 && strncmp(slot->key, key, KEY_SIZE) == 0) return slot->offset;
+
+    idx = (idx + 1) % INDEX_CAPACITY;
+  }
+
+  return -1;
+}
+
+
+
+/*
+ * index_delete
+ *
+ * Marks used slot as a tombstone in the index table
+ */
+void index_delete(const char *key) {
+  uint32_t h = hash_key(key);
+  uint32_t idx = h % INDEX_CAPACITY;
+
+  for (int i = 0; i < INDEX_CAPACITY; ++i) {
+    IndexSlot *slot = &index_table[idx];
+
+    if (slot->used == 0) return;
+
+    if (slot->used == 1 && strncmp(slot->key, key, KEY_SIZE) == 0) {
+      slot->used = -1; // tombstone
+      return;
+    }
+
+    idx = (idx + 1) % INDEX_CAPACITY;
+  }
+}
+
+/*
+ * index_update
+ *
+ * Updates offset for a key
+ */
+void index_update(const char *key, off_t offset) {
+  uint32_t h = hash_key(key);
+  uint32_t idx = h % INDEX_CAPACITY;
+  int first_tombstone = -1;
+
+  for (int i = 0; i < INDEX_CAPACITY; ++i) {
+    IndexSlot *slot = index_table + idx;
+
+    if (slot->used == 1 && strncmp(slot->key, key, KEY_SIZE) == 0) {
+      slot->offset = offset;
+      return;
+    }
+
+    if (slot->used == -1 && first_tombstone == -1) { first_tombstone = idx; }
+
+    if (slot->used == 0) {
+      if (first_tombstone != -1) slot = &index_table[first_tombstone];
+
+      strncpy(slot->key, key, KEY_SIZE - 1);
+      slot->offset = offset;
+      slot->used = 1;
+      return;
+    }
+    idx = (idx + 1) % INDEX_CAPACITY;
+  }
+}
 
 /*
  * db_delete
  *
  * Writes a new entry to the database with DiskRecord.deleted = 1
  * Also updates the index entry offset to -1
+ *
+ * Persistence:
+ *  On succesful return, the tombstone record is durable on disk.
+ *
+ * Failure behaviour:
+ *  Terminates the process on any I/O error.
  */
 void db_delete(const char *filename, const char *key) {
   int fd = open(filename, O_WRONLY | O_CREAT | O_APPEND, 0644);
@@ -327,14 +357,56 @@ void db_delete(const char *filename, const char *key) {
   }
   close(fd);
 
-  // mark offset of in-memory index as -1 for the said key
-  for (int i = 0; i < index_entry_len; ++i) {
-    if (strncmp(index_entries[i].key, key, KEY_SIZE) == 0) {
-      index_entries[i].offset = -1;
-      return;
-    }
-  }
+  index_delete(key);
 }
+
+/*
+ * build_index
+ *
+ * Reads the database file and builds the in-memory global index of all records
+ * Takes the latest value for each key
+ *
+ * Persistence:
+ *  Performs read-only I/O and does not modify on-disk state.
+ *
+ * Failure behaviour:
+ *  Terminates the process on any I/O error.
+ *
+ *
+ */
+void build_index(const char *filename) {
+  int fd = open(filename, O_RDONLY | O_CREAT, 0644);
+  if (fd < 0) {
+    perror("open");
+    exit(1);
+  }
+
+  memset(index_table, 0, sizeof(index_table));
+
+  DiskRecord dr;
+  off_t offset = 0;
+
+  while ((read(fd, &dr, sizeof(DiskRecord))) == sizeof(DiskRecord)) {
+    if (dr.magic != RECORD_MAGIC) break;
+
+    if (dr.deleted) {
+      index_delete(dr.record.key);
+    } else {
+      index_update(dr.record.key, offset);
+    }
+
+    offset += sizeof(DiskRecord);
+  }
+
+  close(fd);
+}
+
+/*
+ * input_loop
+ *
+ * Continous user facing input loop for testing the program
+ * Breaks on Ctrl-C
+ */
 
 void input_loop() {
   char op[50];
@@ -344,13 +416,13 @@ void input_loop() {
 
   while (1) {
     printf("Enter operation: (insert, get, delete)\n");
-    scanf(" %s", op);
+    if (scanf(" %s", op) != 1) break;
     printf("Enter key:\n");
-    scanf("%s", key);
+    if (scanf("%s", key) != 1) break;
 
     int found = 0;
     if (strcmp(op, "get") == 0) {
-      off_t offset = get_offset(key);
+      off_t offset = index_lookup(key);
 
       if (offset < 0) {
         printf("index miss\n");
@@ -368,7 +440,7 @@ void input_loop() {
       printf("Enter value for %s\n", key);
       scanf("%s", in_value);
 
-      index_entries[index_entry_len++] = db_insert(db_file_name, key, in_value);
+      db_insert(db_file_name, key, in_value);
       printf("Inserted %s\n", key);
     } else if (strcmp(op, "delete") == 0) {
       db_delete(db_file_name, key);
