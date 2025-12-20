@@ -1,8 +1,4 @@
 #include "ink.h"
-#include <stdint.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
 
 const char db_file_name[] = "db.bin";
 
@@ -52,14 +48,11 @@ void db_insert(const char *filename, const char *key, const char *value) {
 
   close(fd);
 
-  index_update(key, offset);
+  index_update(index_table,key, offset);
 }
 /*
  * Reads a DiskRecord from filename at the given offset and copies
  * its value field into out_value.
- *
- * The offset must refer to the starting position of a valid DiskRecord
- * previously returned by db_insert.
  *
  * Persistence behaviour:
  *   out_value is updated with the value for the offset
@@ -147,7 +140,7 @@ void compact() {
   DiskRecord dr;
   off_t new_offset = 0;
 
-  for (int i = 0; i < INDEX_CAPACITY; ++i) {
+  for (int i = 0; i < index_cap; ++i) {
     if (index_table[i].used != 1) continue;
     if (lseek(in_fd, index_table[i].offset, SEEK_SET) == (off_t)-1) {
       perror("lseek");
@@ -231,7 +224,7 @@ void db_delete(const char *filename, const char *key) {
   }
   close(fd);
 
-  index_delete(key);
+  index_delete(index_table, key);
 }
 
 /*
@@ -251,7 +244,11 @@ void build_index(const char *filename) {
     exit(1);
   }
 
-  memset(index_table, 0, sizeof(index_table));
+  index_table = calloc(index_cap, sizeof(IndexSlot));
+  if (!index_table) {
+    perror("calloc");
+    exit(1);
+  }
 
   DiskRecord dr;
   off_t offset = 0;
@@ -260,9 +257,9 @@ void build_index(const char *filename) {
     if (dr.magic != RECORD_MAGIC) break;
 
     if (dr.deleted) {
-      index_delete(dr.record.key);
+      index_delete(index_table, dr.record.key);
     } else {
-      index_update(dr.record.key, offset);
+      index_update(index_table, dr.record.key, offset);
     }
 
     offset += sizeof(DiskRecord);
@@ -270,5 +267,3 @@ void build_index(const char *filename) {
 
   close(fd);
 }
-
-
