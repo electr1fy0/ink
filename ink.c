@@ -121,17 +121,19 @@ void build_index(const char *filename) {
   }
 
   DiskRecord dr;
-
   off_t offset = 0;
+
   while ((read(fd, &dr, sizeof(DiskRecord))) == sizeof(DiskRecord)) {
     if (dr.magic != RECORD_MAGIC) break;
 
     int found = 0;
     Record r = dr.record;
-
     for (int i = 0; i < index_entry_len; ++i) {
       if (strncmp(index_entries[i].key, r.key, KEY_SIZE) == 0) {
-        index_entries[i].offset = offset;
+        if (!dr.deleted)
+          index_entries[i].offset = offset;
+        else
+          index_entries[i].offset = -1;
         found = 1;
         break;
       }
@@ -139,10 +141,10 @@ void build_index(const char *filename) {
 
     if (!found) {
       strcpy(index_entries[index_entry_len].key, r.key);
-      index_entries[index_entry_len].offset = offset;
+      if (!dr.deleted) index_entries[index_entry_len].offset = offset;
       index_entry_len++;
     }
-
+    if (dr.deleted) {}
     offset += sizeof(DiskRecord);
   }
   close(fd);
@@ -238,6 +240,7 @@ void compact() {
   off_t new_offset = 0;
 
   for (int i = 0; i < index_entry_len; ++i) {
+    if (index_entries[i].offset < 0) continue;
     if (lseek(in_fd, index_entries[i].offset, SEEK_SET) == (off_t)-1) {
       perror("lseek");
       close(in_fd);
@@ -290,7 +293,8 @@ void compact() {
 /*
  * db_delete
  *
- *
+ * Writes a new entry to the database with DiskRecord.deleted = 1
+ * Also updates the index entry offset to -1
  */
 void db_delete(const char *filename, const char *key) {
   int fd = open(filename, O_WRONLY | O_CREAT | O_APPEND, 0644);
