@@ -36,10 +36,6 @@ typedef struct {
   Record record;
 } DiskRecord;
 
-// typedef struct {
-//   char key[KEY_SIZE];
-//   off_t offset;
-// } IndexEntry;
 
 void db_insert(const char *filename, const char *key, const char *value);
 void db_get_at(const char *filename, off_t offset, char *out_value);
@@ -52,5 +48,7 @@ void compact();
 void index_update(IndexSlot *idx_table, const char *key, off_t offset);
 void index_delete(IndexSlot *idx_table, const char *key);
 off_t index_lookup(IndexSlot *idx_table, const char *key);
+int load_snapshot();
+void snapshot_index();
 
 #endif

@@ -8,6 +8,7 @@ void input_loop() {
 
   index_table = malloc(sizeof(IndexSlot) * index_cap);
 
+  int op_cnt = 0;
   while (1) {
     printf("Enter operation: (insert, get, delete)\n");
     if (scanf(" %s", op) != 1)
@@ -16,9 +17,13 @@ void input_loop() {
     if (scanf("%s", key) != 1)
       break;
 
+    if (op_cnt % 5 == 0) {
+      compact();
+      snapshot_index();
+    }
     int found = 0;
     if (strcmp(op, "get") == 0) {
-      off_t offset = index_lookup(index_table,  key);
+      off_t offset = index_lookup(index_table, key);
 
       if (offset < 0) {
         printf("index miss\n");
@@ -43,13 +48,16 @@ void input_loop() {
       db_delete(db_file_name, key);
       printf("Key %s deleted\n", key);
     }
+    op_cnt++;
   }
 }
 
 int main() {
+  if (!load_snapshot()) {
+    build_index(db_file_name);
+  }
+
   printf("Hi from Ink\n");
-  build_index(db_file_name);
-  compact();
 
   input_loop();
 }
