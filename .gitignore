@@ -4,3 +4,5 @@ Doxyfile
 test.c
 db.bin
 index.bin
+store.db
+ink_rs/target/
