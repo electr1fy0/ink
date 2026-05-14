@@ -1,0 +1,246 @@
+package main
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log"
+	"net/http"
+	"os"
+	"strings"
+	"sync"
+	"time"
+)
+
+type Store interface {
+	Add(string, string)
+	Get(string) (string, bool)
+	Delete(string) bool
+	GetAll() map[string]string
+}
+
+type Op string
+
+const (
+	Put    Op = "put"
+	Delete Op = "delete"
+	Get    Op = "get"
+)
+
+type LogEntry struct {
+	Op        Op
+	Key       string
+	Value     string
+	Timestamp time.Time
+}
+
+type MapStore struct {
+	mu   sync.RWMutex
+	data map[string]string
+	wal  Wal
+}
+
+func (m *MapStore) Add(key, value string) {
+	m.mu.Lock()
+	m.data[key] = value
+	m.mu.Unlock()
+}
+
+func (m *MapStore) Get(key string) (string, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	value, ok := m.data[key]
+	return value, ok
+}
+
+func (m *MapStore) Delete(key string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if _, ok := m.data[key]; !ok {
+		return false
+	}
+	delete(m.data, key)
+	return true
+}
+
+func (m *MapStore) GetAll() map[string]string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	out := make(map[string]string, len(m.data))
+	for key, value := range m.data {
+		out[key] = value
+	}
+	return out
+}
+
+type Wal struct {
+	filename string
+}
+
+func (m *Wal) Add(entry *LogEntry) error {
+	data, err := json.Marshal(entry)
+	if err != nil {
+		return fmt.Errorf("failed to marshal log entry: %w", err)
+	}
+	f, err := os.OpenFile(m.filename, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return fmt.Errorf("failed to open log-file: %w", err)
+	}
+	data = []byte(string(data) + "\n")
+	_, err = f.Write(data)
+	if err != nil {
+		return fmt.Errorf("failed to write to log-file: %w", err)
+	}
+	err = f.Sync()
+	if err != nil {
+		return fmt.Errorf("failed to fsync the log-file %w", err)
+	}
+
+	return nil
+}
+
+type Handler struct {
+	Store Store
+	Wal   *Wal
+}
+
+type HttpError struct {
+	Status  int
+	Message string
+	Err     error
+}
+
+func (h *HttpError) Error() string {
+	return h.Message
+}
+
+func httpError(w http.ResponseWriter, err error) {
+	if err == nil {
+		return
+	}
+
+	var httpErr *HttpError
+	if ok := errors.As(err, &httpErr); ok {
+		http.Error(w, httpErr.Message, httpErr.Status)
+		return
+	}
+
+	http.Error(w, err.Error(), http.StatusInternalServerError)
+}
+
+func handle(fn func(http.ResponseWriter, *http.Request) error) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		httpError(w, fn(w, r))
+	}
+}
+
+func (h *Handler) Get(w http.ResponseWriter, r *http.Request) error {
+	key := r.PathValue("key")
+	value, ok := h.Store.Get(key)
+	if !ok {
+		return &HttpError{
+			Status:  http.StatusNotFound,
+			Message: "not found",
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	return json.NewEncoder(w).Encode(map[string]string{
+		"key":   key,
+		"value": value,
+	})
+}
+
+func (h *Handler) Put(w http.ResponseWriter, r *http.Request) error {
+	key := r.PathValue("key")
+	var v struct {
+		Value string `json:"value"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&v); err != nil {
+		return &HttpError{
+			Status:  http.StatusBadRequest,
+			Message: err.Error(),
+			Err:     err,
+		}
+	}
+
+	entry := &LogEntry{
+		"put", key, v.Value, time.Now(),
+	}
+	h.Wal.Add(entry)
+
+	h.Store.Add(key, v.Value)
+
+	w.WriteHeader(201)
+	return nil
+}
+
+func (h *Handler) Delete(w http.ResponseWriter, r *http.Request) error {
+	key := r.PathValue("key")
+	if !h.Store.Delete(key) {
+		return &HttpError{
+			Status:  http.StatusNotFound,
+			Message: "not found",
+		}
+	}
+
+	if h.Wal != nil {
+		_ = h.Wal.Add(&LogEntry{
+			Op:        Delete,
+			Key:       key,
+			Timestamp: time.Now(),
+		})
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+	return nil
+}
+
+func (h *Handler) GetAll(w http.ResponseWriter, r *http.Request) error {
+	w.Header().Set("Content-Type", "application/json")
+	return json.NewEncoder(w).Encode(h.Store.GetAll())
+}
+func (h *Handler) Health(w http.ResponseWriter, r *http.Request) {
+}
+
+func main() {
+	store := &MapStore{data: make(map[string]string)}
+	wal := &Wal{"ink-wal"}
+
+	h := Handler{
+		store, wal,
+	}
+
+	data, err := os.ReadFile(h.Wal.filename)
+	if err != nil && !os.IsNotExist(err) {
+		log.Fatal("failed to read log file: ", err)
+	}
+	for line := range strings.SplitSeq(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		var entry LogEntry
+		err := json.Unmarshal([]byte(line), &entry)
+		if err != nil {
+			log.Fatal("failed to unmarshal log entry: ", err)
+		}
+		switch entry.Op {
+		case Delete:
+			h.Store.Delete(entry.Key)
+		default:
+			h.Store.Add(entry.Key, entry.Value)
+		}
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("PUT /{key}", handle(h.Put))
+	mux.HandleFunc("GET /{key}", handle(h.Get))
+	mux.HandleFunc("DELETE /{key}", handle(h.Delete))
+	mux.HandleFunc("GET /", handle(h.GetAll))
+
+	log.Fatal(http.ListenAndServe(":8080", mux))
+}
