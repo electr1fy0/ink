@@ -7,4 +7,7 @@ require (
 	github.com/google/go-cmp v0.7.0
 )
 
-require gopkg.in/yaml.v3 v3.0.1 // indirect
+require (
+	golang.org/x/sync v0.20.0 // indirect
+	gopkg.in/yaml.v3 v3.0.1 // indirect
+)

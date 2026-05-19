@@ -100,7 +100,8 @@ func (r *Ring) GetNodes(key string, n int) []string {
 	for len(nodes) < n && len(seen) < len(r.hashMap) {
 		node := r.hashMap[r.keys[idx%len(r.keys)]]
 
-		if seen[node] != struct{}{} {
+		_, ok := seen[node]
+		if !ok {
 			seen[node] = struct{}{}
 			nodes = append(nodes, node)
 		}

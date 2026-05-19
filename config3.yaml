@@ -1,0 +1,7 @@
+node_id: "node-c"
+address: ":8003"
+peers:
+  - id: "node-a"
+    address: ":8001"
+  - id: "node-b"
+    address: ":8002"

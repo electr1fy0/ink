@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log"
 	"net/http"
 	"os"
@@ -20,10 +19,10 @@ import (
 var cfg Config
 
 type Store interface {
-	Add(string, string)
-	Get(string) (string, bool)
+	Add(string, Entry)
+	Get(string) (Entry, bool)
 	Delete(string) bool
-	GetAll() map[string]string
+	GetAll() map[string]Entry
 }
 
 type Op string
@@ -43,17 +42,23 @@ type LogEntry struct {
 
 type MapStore struct {
 	mu   sync.RWMutex
-	data map[string]string
+	data map[string]Entry
 	wal  Wal
 }
 
-func (m *MapStore) Add(key, value string) {
+func (m *MapStore) Add(key string, entry Entry) {
 	m.mu.Lock()
-	m.data[key] = value
+	exists, ok := m.data[key]
+
+	// no op if already newer entry
+	if exists.Timestamp.Before(entry.Timestamp) || !ok {
+		m.data[key] = entry
+	}
+
 	m.mu.Unlock()
 }
 
-func (m *MapStore) Get(key string) (string, bool) {
+func (m *MapStore) Get(key string) (Entry, bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
@@ -72,14 +77,15 @@ func (m *MapStore) Delete(key string) bool {
 	return true
 }
 
-func (m *MapStore) GetAll() map[string]string {
+func (m *MapStore) GetAll() map[string]Entry {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	out := make(map[string]string, len(m.data))
+	out := make(map[string]Entry, len(m.data))
 	for key, value := range m.data {
 		out[key] = value
 	}
+
 	return out
 }
 
@@ -156,17 +162,60 @@ func (h *Handler) Get(w http.ResponseWriter, r *http.Request) error {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	return json.NewEncoder(w).Encode(map[string]string{
+	if err := json.NewEncoder(w).Encode(map[string]string{
 		"key":   key,
-		"value": value,
-	})
+		"value": value.Value,
+	}); err != nil {
+		return &HttpError{
+			Status:  http.StatusInternalServerError,
+			Message: "failed to encode response",
+			Err:     err,
+		}
+	}
+
+	return nil
+}
+
+type Entry struct {
+	Value     string    `json:"value"`
+	Timestamp time.Time `json:"timestamp"`
+}
+
+func (h *Handler) InternalPut(w http.ResponseWriter, r *http.Request) error {
+	key := r.PathValue("key")
+	var toWrite Entry
+	if err := json.NewDecoder(r.Body).Decode(&toWrite); err != nil {
+		return &HttpError{
+			Status:  http.StatusBadRequest,
+			Message: "failed to decode internal put body",
+			Err:     err,
+		}
+	}
+
+	logEntry := LogEntry{
+		Op:        "write",
+		Key:       key,
+		Value:     toWrite.Value,
+		Timestamp: toWrite.Timestamp,
+	}
+	if err := h.Wal.Add(&logEntry); err != nil {
+		return &HttpError{
+			Status:  http.StatusInternalServerError,
+			Message: "wal write failed",
+			Err:     err,
+		}
+	}
+	h.Store.Add(key, toWrite)
+
+	w.WriteHeader(201)
+	w.Write([]byte("written"))
+
+	return nil
 }
 
 func (h *Handler) Put(w http.ResponseWriter, r *http.Request) error {
 	key := r.PathValue("key")
-	var v struct {
-		Value string `json:"value"`
-	}
+	var v Entry
 	if err := json.NewDecoder(r.Body).Decode(&v); err != nil {
 		return &HttpError{
 			Status:  http.StatusBadRequest,
@@ -174,51 +223,75 @@ func (h *Handler) Put(w http.ResponseWriter, r *http.Request) error {
 			Err:     err,
 		}
 	}
-	nodeID, ok := hashRing.GetNode(key)
-	if !ok {
-		return fmt.Errorf("failed to get nodeID from ring")
+
+	fmt.Println("before replicate")
+	if ReplicateWrite(&v, key, 3) < 2 {
+		return &HttpError{
+			Status:  http.StatusServiceUnavailable,
+			Message: "failed to reach quorum of 2 acks",
+		}
+	} else {
+		json.NewEncoder(w).Encode(map[string]string{
+			"response": "quorum achieved",
+		})
 	}
 
-	if nodeID != cfg.NodeID {
+	fmt.Println("loop")
+	return nil
+}
 
-		for _, peer := range cfg.Peers {
-			if nodeID == peer.ID {
-				body, err := json.Marshal(v)
-				if err != nil {
-					return fmt.Errorf("failed to marshal body in put: %w", err)
-				}
-				// forming http://localhost:port/{key}
-				// address is : + port already
-				url := fmt.Sprintf("http://localhost%s/%s", peer.Address, key)
-				req, err := http.NewRequest(http.MethodPut, url, bytes.NewReader(body))
-				if err != nil {
-					return fmt.Errorf("failed to create request in put: %w", err)
-				}
-				req.Header.Set("Content-Type", "application/json")
-				client := &http.Client{}
-				resp, err := client.Do(req)
-				if err != nil {
-					return fmt.Errorf("failed to read resp of forwarded req in put %w", err)
-				}
+func ReplicateWrite(v *Entry, key string, n int) int {
+	fmt.Println("loop")
+	nodes := hashRing.GetNodes(key, n)
+	body, err := json.Marshal(v)
+	var result = make(chan bool, n)
+	acks := 0
+	for _, nodeID := range nodes {
+		for _, p := range cfg.Peers {
+			if nodeID == p.ID {
+				go func(p Peer) {
+					if err != nil {
+						result <- false
+						return
+					}
+					// forming http://localhost:port/{key}
+					// address is : + port already
+					url := fmt.Sprintf("http://localhost%s/internal/%s", p.Address, key)
+					req, err := http.NewRequest(http.MethodPut, url, bytes.NewReader(body))
+					if err != nil {
+						result <- false
+						return
+					}
+					req.Header.Set("Content-Type", "application/json")
+					client := &http.Client{}
+					resp, err := client.Do(req)
+					if err != nil {
+						result <- false
+						return
+					}
 
-				defer resp.Body.Close()
-				fmt.Println("got forwarded resp")
-				io.Copy(w, resp.Body)
-				return nil
+					defer resp.Body.Close()
+					if err != nil {
+						result <- false
+					}
+
+					result <- true
+				}(p)
 			}
 		}
 	}
-	entry := &LogEntry{
-		"put", key, v.Value, time.Now(),
+channelLoop:
+	for {
+		select {
+		case res := <-result:
+			if res {
+				acks++
+			}
+		case <-time.After(1 * time.Second):
+			break channelLoop
+		}
 	}
-	if err := h.Wal.Add(entry); err != nil {
-		return fmt.Errorf("wal write failed: %w", err)
-	}
-	h.Store.Add(key, v.Value)
-
-	w.WriteHeader(201)
-	w.Write([]byte("written"))
-	return nil
+	return acks
 }
 
 func (h *Handler) Delete(w http.ResponseWriter, r *http.Request) error {
@@ -231,11 +304,17 @@ func (h *Handler) Delete(w http.ResponseWriter, r *http.Request) error {
 	}
 
 	if h.Wal != nil {
-		_ = h.Wal.Add(&LogEntry{
+		if err := h.Wal.Add(&LogEntry{
 			Op:        Delete,
 			Key:       key,
 			Timestamp: time.Now(),
-		})
+		}); err != nil {
+			return &HttpError{
+				Status:  http.StatusInternalServerError,
+				Message: "wal write failed",
+				Err:     err,
+			}
+		}
 	}
 
 	w.WriteHeader(http.StatusNoContent)
@@ -244,7 +323,14 @@ func (h *Handler) Delete(w http.ResponseWriter, r *http.Request) error {
 
 func (h *Handler) GetAll(w http.ResponseWriter, r *http.Request) error {
 	w.Header().Set("Content-Type", "application/json")
-	return json.NewEncoder(w).Encode(h.Store.GetAll())
+	if err := json.NewEncoder(w).Encode(h.Store.GetAll()); err != nil {
+		return &HttpError{
+			Status:  http.StatusInternalServerError,
+			Message: "failed to encode response",
+			Err:     err,
+		}
+	}
+	return nil
 }
 func (h *Handler) Health(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte("don't worry about me mate"))
@@ -264,7 +350,8 @@ type Peer struct {
 var hashRing = ring.NewRing(10)
 
 func main() {
-	config, err := os.Open("config.yaml")
+	configID := os.Args[1]
+	config, err := os.Open("config" + configID + ".yaml")
 	if err != nil {
 		panic(err)
 	}
@@ -277,7 +364,7 @@ func main() {
 
 	fmt.Printf("%+v", cfg)
 
-	store := &MapStore{data: make(map[string]string)}
+	store := &MapStore{data: make(map[string]Entry)}
 	wal := &Wal{"ink-wal"}
 
 	h := Handler{
@@ -302,15 +389,17 @@ func main() {
 		case Delete:
 			h.Store.Delete(entry.Key)
 		default:
-			h.Store.Add(entry.Key, entry.Value)
+			h.Store.Add(entry.Key, Entry{Value: entry.Value, Timestamp: entry.Timestamp})
 		}
 	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("PUT /{key}", handle(h.Put))
+
+	mux.HandleFunc("PUT /internal/{key}", handle(h.InternalPut))
 	mux.HandleFunc("GET /{key}", handle(h.Get))
 	mux.HandleFunc("DELETE /{key}", handle(h.Delete))
 	mux.HandleFunc("GET /", handle(h.GetAll))
 
-	log.Fatal(http.ListenAndServe(":8002", mux))
+	log.Fatal(http.ListenAndServe(cfg.Address, mux))
 }
