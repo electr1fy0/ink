@@ -1,16 +1,23 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/electr1fy0/ink/internal/ring"
+	"gopkg.in/yaml.v3"
 )
+
+var cfg Config
 
 type Store interface {
 	Add(string, string)
@@ -89,6 +96,7 @@ func (m *Wal) Add(entry *LogEntry) error {
 	if err != nil {
 		return fmt.Errorf("failed to open log-file: %w", err)
 	}
+	defer f.Close()
 	data = []byte(string(data) + "\n")
 	_, err = f.Write(data)
 	if err != nil {
@@ -166,15 +174,50 @@ func (h *Handler) Put(w http.ResponseWriter, r *http.Request) error {
 			Err:     err,
 		}
 	}
+	nodeID, ok := hashRing.GetNode(key)
+	if !ok {
+		return fmt.Errorf("failed to get nodeID from ring")
+	}
 
+	if nodeID != cfg.NodeID {
+
+		for _, peer := range cfg.Peers {
+			if nodeID == peer.ID {
+				body, err := json.Marshal(v)
+				if err != nil {
+					return fmt.Errorf("failed to marshal body in put: %w", err)
+				}
+				// forming http://localhost:port/{key}
+				// address is : + port already
+				url := fmt.Sprintf("http://localhost%s/%s", peer.Address, key)
+				req, err := http.NewRequest(http.MethodPut, url, bytes.NewReader(body))
+				if err != nil {
+					return fmt.Errorf("failed to create request in put: %w", err)
+				}
+				req.Header.Set("Content-Type", "application/json")
+				client := &http.Client{}
+				resp, err := client.Do(req)
+				if err != nil {
+					return fmt.Errorf("failed to read resp of forwarded req in put %w", err)
+				}
+
+				defer resp.Body.Close()
+				fmt.Println("got forwarded resp")
+				io.Copy(w, resp.Body)
+				return nil
+			}
+		}
+	}
 	entry := &LogEntry{
 		"put", key, v.Value, time.Now(),
 	}
-	h.Wal.Add(entry)
-
+	if err := h.Wal.Add(entry); err != nil {
+		return fmt.Errorf("wal write failed: %w", err)
+	}
 	h.Store.Add(key, v.Value)
 
 	w.WriteHeader(201)
+	w.Write([]byte("written"))
 	return nil
 }
 
@@ -204,9 +247,36 @@ func (h *Handler) GetAll(w http.ResponseWriter, r *http.Request) error {
 	return json.NewEncoder(w).Encode(h.Store.GetAll())
 }
 func (h *Handler) Health(w http.ResponseWriter, r *http.Request) {
+	w.Write([]byte("don't worry about me mate"))
 }
 
+type Config struct {
+	Address string `yaml:"address"`
+	NodeID  string `yaml:"node_id"`
+	Peers   []Peer
+}
+
+type Peer struct {
+	Address string `yaml:"address"`
+	ID      string `yaml:"id"`
+}
+
+var hashRing = ring.NewRing(10)
+
 func main() {
+	config, err := os.Open("config.yaml")
+	if err != nil {
+		panic(err)
+	}
+
+	yaml.NewDecoder(config).Decode(&cfg)
+	hashRing.AddNode(cfg.NodeID)
+	for _, p := range cfg.Peers {
+		hashRing.AddNode(p.ID)
+	}
+
+	fmt.Printf("%+v", cfg)
+
 	store := &MapStore{data: make(map[string]string)}
 	wal := &Wal{"ink-wal"}
 
@@ -242,5 +312,5 @@ func main() {
 	mux.HandleFunc("DELETE /{key}", handle(h.Delete))
 	mux.HandleFunc("GET /", handle(h.GetAll))
 
-	log.Fatal(http.ListenAndServe(":8080", mux))
+	log.Fatal(http.ListenAndServe(":8002", mux))
 }

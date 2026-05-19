@@ -6,3 +6,4 @@ db.bin
 index.bin
 store.db
 ink_rs/target/
+ink-wal
