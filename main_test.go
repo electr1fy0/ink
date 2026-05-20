@@ -8,18 +8,19 @@ import (
 	"testing"
 	"time"
 
+	"github.com/electr1fy0/ink/internal/wal"
 	"github.com/google/go-cmp/cmp"
 )
 
 func TestAddToLog(t *testing.T) {
 	curTime := time.Now()
-	entry := &LogEntry{
+	entry := &wal.LogEntry{
 		"get", "meow", "wow", curTime,
 	}
 	fmt.Println("testing")
-	wal := Wal{"log-test"}
+	w := wal.Wal{"log-test"}
 
-	err := wal.Add(entry)
+	err := w.Add(entry)
 
 	if err != nil {
 		t.Fatal(err)
@@ -33,7 +34,7 @@ func TestAddToLog(t *testing.T) {
 	readData := strings.TrimSpace(string(data))
 	os.Remove("log-test")
 
-	var got = &LogEntry{}
+	var got = &wal.LogEntry{}
 	lines := strings.Split(readData, "\n")
 
 	last := lines[len(lines)-1]
