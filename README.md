@@ -1,6 +1,8 @@
 # Ink
 
 A minimal, Dynamo-style leaderless sharded and replicated key-value store written in Go.
+<img width="5172" height="2932" alt="Untitled-2026-02-10-1723" src="https://github.com/user-attachments/assets/f7ead91b-9b8c-4e93-86df-b188ad788473" />
+<img width="3846" height="2592" alt="Untitled-2026-03-26-1616" src="https://github.com/user-attachments/assets/c116e72e-5d3d-4648-9ca4-107681ac544e" />
 
 ## Features
 
