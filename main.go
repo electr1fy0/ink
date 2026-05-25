@@ -20,6 +20,7 @@ func main() {
 	}
 
 	configID := os.Args[1]
+
 	config, err := os.Open("config" + configID + ".yaml")
 	if err != nil {
 		log.Fatal("failed to open config: ", err)
@@ -58,6 +59,7 @@ func main() {
 func SetupRoutes(h *handler.Handler) *http.ServeMux {
 	mux := http.NewServeMux()
 
+	mux.HandleFunc("GET /internal/{key}", handler.Handle(h.InternalGet))
 	mux.HandleFunc("PUT /internal/{key}", handler.Handle(h.InternalPut))
 	mux.HandleFunc("PUT /{key}", handler.Handle(h.Put))
 	mux.HandleFunc("GET /{key}", handler.Handle(h.Get))

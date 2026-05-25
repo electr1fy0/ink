@@ -10,9 +10,13 @@ import (
 )
 
 type Ring struct {
+	// count of virtual replicas of each node
 	replicas int
 
-	keys    []uint64
+	// sorted keys
+	keys []uint64
+
+	// key -> nodeID
 	hashMap map[uint64]string
 }
 
@@ -95,7 +99,7 @@ func (r *Ring) GetNodes(key string, n int) []string {
 	}
 
 	var nodes []string
-	// collecting unique physical nodes starting from valid index
+	// collect unique physical nodes starting from valid index
 	seen := make(map[string]struct{})
 	for len(nodes) < n && len(seen) < len(r.hashMap) {
 		node := r.hashMap[r.keys[idx%len(r.keys)]]

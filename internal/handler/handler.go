@@ -43,6 +43,20 @@ func Handle(fn func(http.ResponseWriter, *http.Request) error) http.HandlerFunc 
 	}
 }
 
+func (h *Handler) InternalGet(w http.ResponseWriter, r *http.Request) error {
+	key := r.PathValue("key")
+	entry, ok := h.App.InternalGet(key)
+	if !ok {
+		return &HttpError{
+			Status:  http.StatusNotFound,
+			Message: "not found",
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	return json.NewEncoder(w).Encode(entry)
+}
+
 func (h *Handler) Get(w http.ResponseWriter, r *http.Request) error {
 	key := r.PathValue("key")
 	value, ok := h.App.Get(key)
@@ -133,14 +147,34 @@ func (h *Handler) Put(w http.ResponseWriter, r *http.Request) error {
 
 	return nil
 }
-
-func (h *Handler) Delete(w http.ResponseWriter, r *http.Request) error {
+func (h *Handler) InternalDelete(w http.ResponseWriter, r *http.Request) error {
 	key := r.PathValue("key")
 	if err := h.App.Delete(key); err != nil {
 		status := http.StatusInternalServerError
 		if err.Error() == "key not found" {
 			status = http.StatusNotFound
 		}
+		return &HttpError{
+			Status:  status,
+			Message: err.Error(),
+			Err:     err,
+		}
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+	return nil
+
+}
+
+func (h *Handler) Delete(w http.ResponseWriter, r *http.Request) error {
+	key := r.PathValue("key")
+
+	if err := h.App.Delete(key); err != nil {
+		status := http.StatusInternalServerError
+		if err.Error() == "failed to reach quorum" {
+			status = http.StatusServiceUnavailable
+		}
+
 		return &HttpError{
 			Status:  status,
 			Message: err.Error(),

@@ -1,6 +1,7 @@
 package store
 
 import (
+	"maps"
 	"sync"
 	"time"
 )
@@ -15,6 +16,7 @@ type Store interface {
 type Entry struct {
 	Value     string    `json:"value"`
 	Timestamp time.Time `json:"timestamp"`
+	Deleted   bool      `json:"deleted"`
 }
 
 type MapStore struct {
@@ -58,9 +60,8 @@ func (m *MapStore) GetAll() map[string]Entry {
 	defer m.mu.RUnlock()
 
 	out := make(map[string]Entry, len(m.Data))
-	for key, value := range m.Data {
-		out[key] = value
-	}
+
+	maps.Copy(out, m.Data)
 
 	return out
 }

@@ -3,11 +3,11 @@ package app
 import (
 	"bufio"
 	"bytes"
-	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/electr1fy0/ink/internal/ring"
@@ -16,9 +16,9 @@ import (
 )
 
 type Config struct {
-	Address string `yaml:"address"`
-	NodeID  string `yaml:"node_id"`
-	Peers   []Peer `yaml:"peers"`
+	Address string          `yaml:"address"`
+	NodeID  string          `yaml:"node_id"`
+	Peers   map[string]Peer `yaml:"peers"` // NodeID -> Peer
 }
 
 type Peer struct {
@@ -42,17 +42,154 @@ func NewApp(s store.Store, w *wal.Wal, r *ring.Ring, cfg *Config) *App {
 	}
 }
 
-func (a *App) Get(key string) (store.Entry, bool) {
+func (a *App) InternalGet(key string) (store.Entry, bool) {
 	return a.Store.Get(key)
 }
 
+func (a *App) Get(key string) (store.Entry, bool) {
+	nodes := a.Ring.GetNodes(key, 3)
+
+	type nodeRes struct {
+		nodeID string
+		entry  *store.Entry
+		err    error
+	}
+	resChan := make(chan nodeRes, len(nodes))
+
+	for _, nodeID := range nodes {
+		if nodeID == a.Cfg.NodeID {
+			e, ok := a.InternalGet(key)
+			if ok {
+				resChan <- nodeRes{nodeID: nodeID, entry: &e}
+			} else {
+				resChan <- nodeRes{nodeID: nodeID, entry: nil}
+			}
+			continue
+		}
+
+		targetPeer, ok := a.Cfg.Peers[nodeID]
+		if !ok {
+			resChan <- nodeRes{nodeID: nodeID, err: fmt.Errorf("peer not found")}
+			continue
+		}
+
+		go func(p Peer) {
+			url := fmt.Sprintf("http://localhost%s/internal/%s", p.Address, key)
+			client := &http.Client{Timeout: 1 * time.Second}
+			resp, err := client.Get(url)
+			if err != nil {
+				resChan <- nodeRes{nodeID: p.ID, err: err}
+				return
+			}
+			defer resp.Body.Close()
+
+			if resp.StatusCode == http.StatusNotFound {
+				resChan <- nodeRes{nodeID: p.ID, entry: nil}
+				return
+			}
+
+			if resp.StatusCode != http.StatusOK {
+				resChan <- nodeRes{nodeID: p.ID, err: fmt.Errorf("status %d", resp.StatusCode)}
+				return
+			}
+
+			var e store.Entry
+			if err := json.NewDecoder(resp.Body).Decode(&e); err != nil {
+				resChan <- nodeRes{nodeID: p.ID, err: err}
+				return
+			}
+			resChan <- nodeRes{nodeID: p.ID, entry: &e}
+		}(targetPeer)
+	}
+
+	var latest *store.Entry
+
+	// nodeID -> Entry in node
+	responses := make(map[string]*store.Entry)
+	successCount := 0
+
+	timeout := time.After(2 * time.Second)
+	for range len(nodes) {
+		select {
+		case res := <-resChan:
+			if res.err == nil {
+				successCount++
+				responses[res.nodeID] = res.entry
+				if res.entry != nil {
+					if latest == nil || res.entry.Timestamp.After(latest.Timestamp) {
+						latest = res.entry
+					}
+				}
+			}
+		case <-timeout:
+			goto next
+		}
+	}
+next:
+	// quorum failed
+	// we lose consistency for availability
+	if successCount < 2 {
+		entry, ok := a.Store.Get(key)
+		if !ok || entry.Deleted {
+			return store.Entry{}, false
+		}
+		return entry, true
+	}
+
+	if latest == nil {
+		return store.Entry{}, false
+	}
+
+	go a.readRepair(key, *latest, responses)
+
+	if latest.Deleted {
+		return store.Entry{}, false
+	}
+
+	return *latest, true
+}
+
+func (a *App) readRepair(key string, latest store.Entry, responses map[string]*store.Entry) {
+	for nodeID, entry := range responses {
+		if entry == nil || entry.Timestamp.Before(latest.Timestamp) {
+			if nodeID == a.Cfg.NodeID {
+				a.Store.Add(key, latest)
+				continue
+			}
+
+			if p, ok := a.Cfg.Peers[nodeID]; ok {
+				body, _ := json.Marshal(latest)
+				url := fmt.Sprintf("http://localhost%s/internal/%s", p.Address, key)
+				req, _ := http.NewRequest(http.MethodPut, url, bytes.NewReader(body))
+				req.Header.Set("Content-Type", "application/json")
+				client := &http.Client{Timeout: 1 * time.Second}
+				resp, err := client.Do(req)
+				if err == nil {
+					resp.Body.Close()
+				}
+			}
+		}
+	}
+}
+
 func (a *App) GetAll() map[string]store.Entry {
-	return a.Store.GetAll()
+	all := a.Store.GetAll()
+	active := make(map[string]store.Entry)
+	for k, v := range all {
+		if !v.Deleted {
+			active[k] = v
+		}
+	}
+	return active
 }
 
 func (a *App) InternalPut(key string, entry store.Entry) error {
+	op := wal.Put
+	if entry.Deleted {
+		op = wal.Delete
+	}
 	logEntry := wal.LogEntry{
-		Op:        wal.Put,
+		Op:        op,
 		Key:       key,
 		Value:     entry.Value,
 		Timestamp: entry.Timestamp,
@@ -89,20 +226,30 @@ func (a *App) Put(key string, value string) error {
 }
 
 func (a *App) Delete(key string) error {
-	if !a.Store.Delete(key) {
+	_, ok := a.Get(key)
+	if !ok {
 		return fmt.Errorf("key not found")
 	}
 
-	if a.Wal != nil {
-		logEntry := wal.LogEntry{
-			Op:        wal.Delete,
-			Key:       key,
-			Timestamp: time.Now(),
-		}
-		if err := a.Wal.Add(&logEntry); err != nil {
-			return fmt.Errorf("wal write failed: %w", err)
-		}
+	entry := store.Entry{
+		Timestamp: time.Now(),
+		Deleted:   true,
 	}
+
+	if a.ReplicateWrite(&entry, key, 3) < 2 {
+		return fmt.Errorf("failed to reach quorum of 2 acks")
+	}
+
+	logEntry := wal.LogEntry{
+		Op:        wal.Delete,
+		Key:       key,
+		Timestamp: entry.Timestamp,
+	}
+
+	if err := a.Wal.Add(&logEntry); err != nil {
+		return fmt.Errorf("wal write failed: %w", err)
+	}
+	a.Store.Add(key, entry)
 	return nil
 }
 
@@ -110,62 +257,57 @@ func (a *App) ReplicateWrite(v *store.Entry, key string, n int) int {
 	nodes := a.Ring.GetNodes(key, n)
 	body, err := json.Marshal(v)
 	if err != nil {
-		fmt.Printf("failed to marshal entry: %v\n", err)
 		return 0
 	}
-	var result = make(chan bool, n)
+
+	var wg sync.WaitGroup
+	var mu sync.Mutex
 	acks := 0
+
 	for _, nodeID := range nodes {
-		// Self-check
 		if nodeID == a.Cfg.NodeID {
+			mu.Lock()
 			acks++
+			mu.Unlock()
 			continue
 		}
 
-		for _, p := range a.Cfg.Peers {
-			if nodeID == p.ID {
-				go func(p Peer) {
-					url := fmt.Sprintf("http://localhost%s/internal/%s", p.Address, key)
-					req, err := http.NewRequest(http.MethodPut, url, bytes.NewReader(body))
-					if err != nil {
-						result <- false
-						return
-					}
-					req.Header.Set("Content-Type", "application/json")
-					client := &http.Client{Timeout: 1 * time.Second}
-					resp, err := client.Do(req)
-					if err != nil {
-						result <- false
-						return
-					}
-					defer resp.Body.Close()
-					result <- (resp.StatusCode == http.StatusCreated || resp.StatusCode == http.StatusOK)
-				}(p)
-			}
+		if p, ok := a.Cfg.Peers[nodeID]; ok {
+			wg.Add(1)
+			go func(p Peer) {
+				defer wg.Done()
+				url := fmt.Sprintf("http://localhost%s/internal/%s", p.Address, key)
+				req, err := http.NewRequest(http.MethodPut, url, bytes.NewReader(body))
+				if err != nil {
+					return
+				}
+				req.Header.Set("Content-Type", "application/json")
+				client := &http.Client{Timeout: 1 * time.Second}
+				resp, err := client.Do(req)
+				if err != nil {
+					return
+				}
+				defer resp.Body.Close()
+				if resp.StatusCode == http.StatusCreated || resp.StatusCode == http.StatusOK {
+					mu.Lock()
+					acks++
+					mu.Unlock()
+				}
+			}(p)
 		}
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
 
-	// Wait for results from peers only
-	peerCount := 0
-	for _, nodeID := range nodes {
-		if nodeID != a.Cfg.NodeID {
-			peerCount++
-		}
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
 	}
 
-	for range peerCount {
-		select {
-		case res := <-result:
-			if res {
-				acks++
-			}
-		case <-ctx.Done():
-			return acks
-		}
-	}
 	return acks
 }
 
@@ -187,12 +329,11 @@ func (a *App) Recover() error {
 		}
 		var entry wal.LogEntry
 		if err := json.Unmarshal([]byte(line), &entry); err != nil {
-			fmt.Printf("failed to unmarshal log entry: %v\n", err)
 			continue
 		}
 		switch entry.Op {
 		case wal.Delete:
-			a.Store.Delete(entry.Key)
+			a.Store.Add(entry.Key, store.Entry{Timestamp: entry.Timestamp, Deleted: true})
 		default:
 			a.Store.Add(entry.Key, store.Entry{Value: entry.Value, Timestamp: entry.Timestamp})
 		}
