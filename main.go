@@ -61,6 +61,7 @@ func SetupRoutes(h *handler.Handler) *http.ServeMux {
 
 	mux.HandleFunc("GET /internal/{key}", handler.Handle(h.InternalGet))
 	mux.HandleFunc("PUT /internal/{key}", handler.Handle(h.InternalPut))
+	mux.HandleFunc("DELETE /internal/{key}", handler.Handle(h.InternalDelete))
 	mux.HandleFunc("PUT /{key}", handler.Handle(h.Put))
 	mux.HandleFunc("GET /{key}", handler.Handle(h.Get))
 	mux.HandleFunc("DELETE /{key}", handler.Handle(h.Delete))

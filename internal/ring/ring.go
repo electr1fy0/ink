@@ -1,7 +1,6 @@
 package ring
 
 import (
-	"fmt"
 	"slices"
 	"sort"
 	"strconv"
@@ -115,19 +114,3 @@ func (r *Ring) GetNodes(key string, n int) []string {
 	return nodes
 }
 
-func main() {
-	ring := NewRing(100)
-	ring.AddNode("node-meow")
-	ring.AddNode("node-husky")
-	ring.AddNode("node-shiba")
-
-	keys := []string{
-		"user:1", "user:idk", "session:meow", "msg:whatever",
-	}
-
-	for _, key := range keys {
-		node, _ := ring.GetNode(key)
-
-		fmt.Printf("%s -> %s\n", key, node)
-	}
-}
