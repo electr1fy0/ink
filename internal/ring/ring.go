@@ -100,7 +100,9 @@ func (r *Ring) GetNodes(key string, n int) []string {
 	var nodes []string
 	// collect unique physical nodes starting from valid index
 	seen := make(map[string]struct{})
-	for len(nodes) < n && len(seen) < len(r.hashMap) {
+	// hashMap contains virtual nodes. Stop after one turn of the ring even
+	// when fewer than n physical nodes exist, as in standalone mode.
+	for visited := 0; visited < len(r.keys) && len(nodes) < n; visited++ {
 		node := r.hashMap[r.keys[idx%len(r.keys)]]
 
 		_, ok := seen[node]
@@ -113,4 +115,3 @@ func (r *Ring) GetNodes(key string, n int) []string {
 
 	return nodes
 }
-

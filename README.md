@@ -27,6 +27,28 @@ go run main.go 2
 go run main.go 3
 ```
 
+## Deploying a standalone node on Harbor
+
+Import this repository with its included `paas.yaml`. Harbor builds the server,
+starts it without arguments, and supplies `PORT`. Ink then runs as one standalone
+node on `127.0.0.1:$PORT`; writes require one local acknowledgement. `/health`
+is the readiness endpoint. No cluster config files or peers are needed.
+
+`go run . 1`, `2`, and `3` continue to use the original cluster configs and
+two-acknowledgement writes. Supplying `PORT` with a config ID overrides that
+node's listener, so its peers must also be configured with the correct address.
+
+Set `INK_DATA_DIR` to a writable, persistent directory to retain the write-ahead
+log. Local cluster mode defaults to the current directory. Platform mode defaults
+to `/tmp/ink-standalone`; Harbor's Linux sandbox gives it temporary storage that
+is lost when the sandbox stops. A healthy deployment with that default is a demo,
+not durable storage. Harbor currently mounts persistent directories only through
+its managed SQLite bindings; adding `INK_DATA_DIR` alone does not create a mount.
+Do not bind a SQLite service to Ink: Ink uses its own WAL, not `DATABASE_URL`.
+Persistent standalone operation requires a writable volume mounted by the host.
+Stop the old standalone process before starting another against the same WAL;
+live overlapping releases are not supported for this in-memory store.
+
 ## API Usage
 
 Clients can interact with any node in the cluster.

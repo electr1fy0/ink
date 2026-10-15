@@ -16,9 +16,10 @@ import (
 )
 
 type Config struct {
-	Address string          `yaml:"address"`
-	NodeID  string          `yaml:"node_id"`
-	Peers   map[string]Peer `yaml:"peers"` // NodeID -> Peer
+	Standalone bool            `yaml:"-"` // Set only by the platform standalone entrypoint.
+	Address    string          `yaml:"address"`
+	NodeID     string          `yaml:"node_id"`
+	Peers      map[string]Peer `yaml:"peers"` // NodeID -> Peer
 }
 
 type Peer struct {
@@ -207,7 +208,7 @@ func (a *App) Put(key string, value string) error {
 		Timestamp: time.Now(),
 	}
 
-	if a.ReplicateWrite(&entry, key, 3) < 2 {
+	if a.ReplicateWrite(&entry, key, 3) < a.writeQuorum() {
 		return fmt.Errorf("failed to reach quorum of 2 acks")
 	}
 
@@ -236,7 +237,7 @@ func (a *App) Delete(key string) error {
 		Deleted:   true,
 	}
 
-	if a.ReplicateWrite(&entry, key, 3) < 2 {
+	if a.ReplicateWrite(&entry, key, 3) < a.writeQuorum() {
 		return fmt.Errorf("failed to reach quorum of 2 acks")
 	}
 
@@ -308,7 +309,16 @@ func (a *App) ReplicateWrite(v *store.Entry, key string, n int) int {
 	case <-time.After(2 * time.Second):
 	}
 
+	mu.Lock()
+	defer mu.Unlock()
 	return acks
+}
+
+func (a *App) writeQuorum() int {
+	if a.Cfg.Standalone {
+		return 1
+	}
+	return 2
 }
 
 func (a *App) Recover() error {
